@@ -39,7 +39,7 @@ function HomeStack() {
 function MacrosStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Macros" component={MacrosScreen} />
+      <Stack.Screen name="MacrosHome" component={MacrosScreen} />
       <Stack.Screen name="FoodSearch" component={FoodSearchScreen} />
       <Stack.Screen name="FoodDetail" component={FoodDetailScreen} />
     </Stack.Navigator>

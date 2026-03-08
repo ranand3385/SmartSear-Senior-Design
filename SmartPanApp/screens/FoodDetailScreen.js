@@ -54,7 +54,7 @@ export default function FoodDetailScreen({ navigation, route }) {
       navigation.navigate('CreateRecipe', { ingredient: entry });
     } else {
       await addFoodEntry(meal, entry);
-      navigation.navigate('Macros');
+      navigation.navigate('MacrosHome');
     }
   };
 

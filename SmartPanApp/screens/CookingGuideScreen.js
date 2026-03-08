@@ -10,7 +10,14 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 import { formatTime } from '../utils/cookingCalculator';
+
+const BEEP_SOUND = require('../assets/sounds/beep.wav');
+
+// DEMO VALUES — replace with actual BLE reads when hardware is ready
+const PAN_TEMPERATURE = 375;
+const PROBE_TEMPERATURE = 142;
 
 // Step IDs
 const STEPS = {
@@ -42,14 +49,42 @@ export default function CookingGuideScreen({ navigation, route }) {
 
   const [timerSecs, setTimerSecs] = useState(secondsPerSide);
   const [timerRunning, setTimerRunning] = useState(false);
+  const [timerDone, setTimerDone] = useState(false);
   const intervalRef = useRef(null);
+  const soundRef = useRef(null);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  // Stop and unload whatever is currently playing
+  const stopSound = useCallback(async () => {
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+      } catch (_) {}
+      soundRef.current = null;
+    }
+  }, []);
+
+  // Start looping jingle
+  const startJingle = useCallback(async () => {
+    await stopSound();
+    try {
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+      const { sound } = await Audio.Sound.createAsync(
+        BEEP_SOUND,
+        { shouldPlay: true, isLooping: true, volume: 1.0 }
+      );
+      soundRef.current = sound;
+    } catch (_) {}
+    Vibration.vibrate([0, 400, 150, 400, 150, 400]);
+  }, [stopSound]);
 
   // Advance to next step with fade transition
   const nextStep = useCallback(() => {
     clearInterval(intervalRef.current);
     setTimerRunning(false);
+    setTimerDone(false);
     Animated.sequence([
       Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
       Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: true }),
@@ -57,7 +92,25 @@ export default function CookingGuideScreen({ navigation, route }) {
     setStepIndex((i) => Math.min(i + 1, STEP_ORDER.length - 1));
   }, [fadeAnim]);
 
-  // Timer logic
+  // Skip — same UX as natural timer expiry: jingle loops until user taps Continue
+  const skipStep = useCallback(async () => {
+    clearInterval(intervalRef.current);
+    setTimerRunning(false);
+    setTimerSecs(0);
+    setTimerDone(true);
+    await startJingle();
+  }, [startJingle]);
+
+  // Continue after jingle — stop sound, advance
+  const continueStep = useCallback(async () => {
+    await stopSound();
+    nextStep();
+  }, [stopSound, nextStep]);
+
+  // Cleanup on unmount
+  useEffect(() => () => { stopSound(); }, [stopSound]);
+
+  // Timer logic — when it hits 0, start jingle and WAIT for user
   useEffect(() => {
     if (timerRunning) {
       intervalRef.current = setInterval(() => {
@@ -65,8 +118,8 @@ export default function CookingGuideScreen({ navigation, route }) {
           if (s <= 1) {
             clearInterval(intervalRef.current);
             setTimerRunning(false);
-            Vibration.vibrate([0, 500, 200, 500]);
-            nextStep();
+            setTimerDone(true);
+            startJingle();
             return 0;
           }
           return s - 1;
@@ -74,18 +127,21 @@ export default function CookingGuideScreen({ navigation, route }) {
       }, 1000);
     }
     return () => clearInterval(intervalRef.current);
-  }, [timerRunning, nextStep]);
+  }, [timerRunning, startJingle]);
 
   // Reset timer when entering a timer step
   useEffect(() => {
     if (currentStep === STEPS.SIDE_1_TIMER) {
       setTimerSecs(secondsPerSide);
+      setTimerDone(false);
       setTimerRunning(true);
     } else if (currentStep === STEPS.SIDE_2_TIMER) {
       setTimerSecs(secondsPerSide);
+      setTimerDone(false);
       setTimerRunning(true);
     } else if (currentStep === STEPS.REST) {
       setTimerSecs(restSeconds);
+      setTimerDone(false);
       setTimerRunning(true);
     }
   }, [currentStep, secondsPerSide, restSeconds]);
@@ -96,7 +152,7 @@ export default function CookingGuideScreen({ navigation, route }) {
       {
         text: 'Quit',
         style: 'destructive',
-        onPress: () => navigation.navigate('Home'),
+        onPress: async () => { await stopSound(); navigation.navigate('Home'); },
       },
     ]);
   };
@@ -145,12 +201,32 @@ export default function CookingGuideScreen({ navigation, route }) {
         </TouchableOpacity>
       )}
 
-      {/* Skip Timer — shown on all timer steps for demo */}
+      {/* Temp strip + Skip — shown on all timer steps */}
       {(currentStep === STEPS.SIDE_1_TIMER || currentStep === STEPS.SIDE_2_TIMER || currentStep === STEPS.REST) && (
-        <TouchableOpacity style={styles.skipBtn} onPress={nextStep} activeOpacity={0.7}>
-          <Ionicons name="play-skip-forward-outline" size={18} color="#888" />
-          <Text style={styles.skipBtnText}>Skip</Text>
-        </TouchableOpacity>
+        <>
+          <View style={styles.tempStrip}>
+            <View style={styles.tempCell}>
+              <Text style={styles.tempStripLabel}>PROBE</Text>
+              <Text style={styles.tempStripValue}>{PROBE_TEMPERATURE}°F</Text>
+            </View>
+            <View style={styles.tempCellDivider} />
+            <View style={styles.tempCell}>
+              <Text style={styles.tempStripLabel}>PAN</Text>
+              <Text style={[styles.tempStripValue, { color: '#4FC3F7' }]}>{PAN_TEMPERATURE}°F</Text>
+            </View>
+          </View>
+          {timerDone ? (
+            <TouchableOpacity style={styles.continueBtn} onPress={continueStep} activeOpacity={0.85}>
+              <Ionicons name="checkmark" size={22} color="#fff" />
+              <Text style={styles.continueBtnText}>Continue</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.skipBtn} onPress={skipStep} activeOpacity={0.7}>
+              <Ionicons name="play-skip-forward-outline" size={18} color="#888" />
+              <Text style={styles.skipBtnText}>Skip</Text>
+            </TouchableOpacity>
+          )}
+        </>
       )}
 
       {currentStep === STEPS.DONE && (
@@ -412,6 +488,52 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   confirmBtnText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  tempStrip: {
+    flexDirection: 'row',
+    backgroundColor: '#1a1a1a',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  tempCell: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 12,
+    gap: 3,
+  },
+  tempCellDivider: {
+    width: 1,
+    backgroundColor: '#2a2a2a',
+  },
+  tempStripLabel: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
+  tempStripValue: {
+    color: '#FF6B35',
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: -0.5,
+  },
+  continueBtn: {
+    backgroundColor: '#FF6B35',
+    borderRadius: 16,
+    paddingVertical: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    shadowColor: '#FF6B35',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  continueBtnText: { color: '#fff', fontSize: 17, fontWeight: '700' },
   skipBtn: {
     borderWidth: 1,
     borderColor: '#2a2a2a',
