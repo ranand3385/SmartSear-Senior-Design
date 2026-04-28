@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,16 +8,15 @@ import {
   Animated,
   Vibration,
   Alert,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
-import { calcCookTimePerSide, formatTime } from '../utils/cookingCalculator';
+import { calcCookTimePerSide, formatTime, BASE_PAN_TEMP } from '../utils/cookingCalculator';
+import { useTelemetry } from '../hooks/useTelemetry';
+import MeatTempChart from '../components/MeatTempChart';
 
 const BEEP_SOUND = require('../assets/sounds/beep.wav');
-
-// DEMO VALUES — replace with actual BLE reads when hardware is ready
-const PAN_TEMPERATURE = 375;
-const PROBE_TEMPERATURE = 142;
 
 // Step IDs
 const STEPS = {
@@ -42,8 +41,18 @@ const STEP_ORDER = [
 
 export default function CookingGuideScreen({ navigation, route }) {
   const { meat, doneness, thicknessInches } = route.params;
-  // Recalculate using actual pan temp so BLE reads auto-adjust cook time when hardware is ready
-  const secondsPerSide = calcCookTimePerSide(meat.id, doneness.id, thicknessInches, PAN_TEMPERATURE);
+
+  const { panF, meatF, connected } = useTelemetry();
+  // Reactive cook time: scales with live pan temp, falls back to baseline when disconnected
+  const livePanF = panF ?? BASE_PAN_TEMP;
+  const secondsPerSide = useMemo(
+    () => calcCookTimePerSide(meat.id, doneness.id, thicknessInches, livePanF),
+    [meat.id, doneness.id, thicknessInches, livePanF]
+  );
+  // Snapshot so mid-cook pan-temp drift doesn't yank the running timer
+  const secondsPerSideRef = useRef(secondsPerSide);
+  useEffect(() => { secondsPerSideRef.current = secondsPerSide; }, [secondsPerSide]);
+
   const restSeconds = (meat.restMinutes ?? 3) * 60;
 
   const [stepIndex, setStepIndex] = useState(0);
@@ -131,14 +140,15 @@ export default function CookingGuideScreen({ navigation, route }) {
     return () => clearInterval(intervalRef.current);
   }, [timerRunning, startJingle]);
 
-  // Reset timer when entering a timer step
+  // Reset timer when entering a timer step. Read secondsPerSide from ref so
+  // a pan-temp update doesn't restart the countdown — we snapshot at step entry.
   useEffect(() => {
     if (currentStep === STEPS.SIDE_1_TIMER) {
-      setTimerSecs(secondsPerSide);
+      setTimerSecs(secondsPerSideRef.current);
       setTimerDone(false);
       setTimerRunning(true);
     } else if (currentStep === STEPS.SIDE_2_TIMER) {
-      setTimerSecs(secondsPerSide);
+      setTimerSecs(secondsPerSideRef.current);
       setTimerDone(false);
       setTimerRunning(true);
     } else if (currentStep === STEPS.REST) {
@@ -146,7 +156,7 @@ export default function CookingGuideScreen({ navigation, route }) {
       setTimerDone(false);
       setTimerRunning(true);
     }
-  }, [currentStep, secondsPerSide, restSeconds]);
+  }, [currentStep, restSeconds]);
 
   const handleQuit = () => {
     Alert.alert('Quit Cooking?', 'Are you sure you want to stop?', [
@@ -175,7 +185,10 @@ export default function CookingGuideScreen({ navigation, route }) {
             {doneness.label}
           </Text>
         </View>
-        <View style={{ width: 32 }} />
+        <View style={styles.connPill}>
+          <View style={[styles.connDot, { backgroundColor: connected ? '#4CAF50' : '#666' }]} />
+          <Text style={styles.connText}>{connected ? 'BLE' : 'Offline'}</Text>
+        </View>
       </View>
 
       {/* Progress Bar */}
@@ -203,18 +216,23 @@ export default function CookingGuideScreen({ navigation, route }) {
         </TouchableOpacity>
       )}
 
-      {/* Temp strip + Skip — shown on all timer steps */}
+      {/* Temp strip + chart + Skip — shown on all timer steps */}
       {(currentStep === STEPS.SIDE_1_TIMER || currentStep === STEPS.SIDE_2_TIMER || currentStep === STEPS.REST) && (
         <>
+          <MeatTempChart meatF={meatF} width={Dimensions.get('window').width - 40} height={140} />
           <View style={styles.tempStrip}>
             <View style={styles.tempCell}>
               <Text style={styles.tempStripLabel}>PROBE</Text>
-              <Text style={styles.tempStripValue}>{PROBE_TEMPERATURE}°F</Text>
+              <Text style={styles.tempStripValue}>
+                {meatF == null ? '—' : `${Math.round(meatF)}°F`}
+              </Text>
             </View>
             <View style={styles.tempCellDivider} />
             <View style={styles.tempCell}>
               <Text style={styles.tempStripLabel}>PAN</Text>
-              <Text style={[styles.tempStripValue, { color: '#4FC3F7' }]}>{PAN_TEMPERATURE}°F</Text>
+              <Text style={[styles.tempStripValue, { color: '#4FC3F7' }]}>
+                {panF == null ? '—' : `${Math.round(panF)}°F`}
+              </Text>
             </View>
           </View>
           {timerDone ? (
@@ -459,6 +477,19 @@ const styles = StyleSheet.create({
   },
   quitBtn: { padding: 4 },
   headerCenter: { alignItems: 'center' },
+  connPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  connDot: { width: 6, height: 6, borderRadius: 3 },
+  connText: { color: '#888', fontSize: 10, fontWeight: '700', letterSpacing: 0.5 },
   headerMeat: { color: '#fff', fontSize: 16, fontWeight: '600' },
   headerDoneness: { fontSize: 13, fontWeight: '500', marginTop: 2 },
   progressTrack: {
