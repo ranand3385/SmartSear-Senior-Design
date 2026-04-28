@@ -1,13 +1,21 @@
 """WebSocket bridge: BLE notifications -> JSON over WS for the SmartPan app.
 
-Wraps Pipeline from ble_pipeline.py and broadcasts state.as_dict() to all
-connected clients on every BLE notification.
-
-Drop this file next to ble_pipeline.py / filter_and_derive.py / etc.
+This is a thin wrapper around the upstream Pipeline class in Sophie's repo at
+`sophiezhou1/ece-design` (data_processing/ble_pipeline.py). Point this script
+at her cloned repo — do NOT vendor a copy.
 
 Usage:
     pip install bleak websockets
-    python ble_ws_bridge.py [--port 8765] [--name sensor_set] [--address ...]
+
+    # one-time: clone Sophie's repo somewhere, e.g. ~/code/ece-design
+    git clone https://github.com/sophiezhou1/ece-design.git
+
+    # then run the bridge, pointing it at her data_processing dir:
+    python ble_ws_bridge.py --data-dir ~/code/ece-design/data_processing
+    # or via env var:
+    SMARTPAN_DATA_DIR=~/code/ece-design/data_processing python ble_ws_bridge.py
+
+Other flags: --port 8765, --name sensor_set, --address <MAC>, --scan-seconds 20.
 
 The app connects to ws://<this-machine-LAN-IP>:8765
 """
@@ -16,12 +24,47 @@ import argparse
 import asyncio
 import json
 import math
+import os
+import sys
+from pathlib import Path
 from typing import Any, Set
 
 import websockets
 from bleak import BleakClient, BleakScanner
 
-from ble_pipeline import (
+
+def _resolve_data_dir() -> Path:
+    """Resolve the data_processing directory before we import from it.
+
+    Precedence: --data-dir CLI flag > SMARTPAN_DATA_DIR env var > error.
+    Errors clearly when nothing is set so the user knows to clone the repo.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--data-dir", default=None)
+    known, _ = pre.parse_known_args()
+
+    cand = known.data_dir or os.environ.get("SMARTPAN_DATA_DIR")
+    if not cand:
+        raise SystemExit(
+            "ERROR: data_processing path not set.\n"
+            "  Pass --data-dir <path> or set env var SMARTPAN_DATA_DIR.\n"
+            "  Example: --data-dir ~/code/ece-design/data_processing"
+        )
+    p = Path(cand).expanduser().resolve()
+    if not p.is_dir():
+        raise SystemExit(f"ERROR: data_processing path does not exist: {p}")
+    if not (p / "ble_pipeline.py").is_file():
+        raise SystemExit(f"ERROR: ble_pipeline.py not found in: {p}")
+    return p
+
+
+# Resolve & inject the upstream repo path before importing Pipeline.
+# Done at module load so argparse below can still reference DEFAULT_NAME.
+_DATA_DIR = _resolve_data_dir()
+sys.path.insert(0, str(_DATA_DIR))
+print(f"[bridge] using data_processing at: {_DATA_DIR}")
+
+from ble_pipeline import (  # noqa: E402  (path-dependent import)
     CHAR_UUID,
     DEFAULT_NAME,
     Pipeline,
@@ -69,7 +112,8 @@ async def run(args: argparse.Namespace) -> None:
         if not clients:
             return
         dead = []
-        for ws in clients:
+        # snapshot — handler may discard from `clients` concurrently on disconnect
+        for ws in list(clients):
             try:
                 await ws.send(payload)
             except Exception:
@@ -106,7 +150,11 @@ async def run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="BLE -> WebSocket bridge for the SmartPan app."
+    )
+    parser.add_argument("--data-dir", default=None,
+                        help="Path to ece-design/data_processing (or set SMARTPAN_DATA_DIR).")
     parser.add_argument("--name", default=DEFAULT_NAME)
     parser.add_argument("--address", default=None)
     parser.add_argument("--scan-seconds", type=float, default=20.0)
