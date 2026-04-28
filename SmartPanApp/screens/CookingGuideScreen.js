@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
-import { formatTime } from '../utils/cookingCalculator';
+import { calcCookTimePerSide, formatTime } from '../utils/cookingCalculator';
 
 const BEEP_SOUND = require('../assets/sounds/beep.wav');
 
@@ -41,7 +41,9 @@ const STEP_ORDER = [
 ];
 
 export default function CookingGuideScreen({ navigation, route }) {
-  const { meat, doneness, secondsPerSide } = route.params;
+  const { meat, doneness, thicknessInches } = route.params;
+  // Recalculate using actual pan temp so BLE reads auto-adjust cook time when hardware is ready
+  const secondsPerSide = calcCookTimePerSide(meat.id, doneness.id, thicknessInches, PAN_TEMPERATURE);
   const restSeconds = (meat.restMinutes ?? 3) * 60;
 
   const [stepIndex, setStepIndex] = useState(0);
