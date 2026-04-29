@@ -2,11 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { TELEMETRY_WS_URL } from '../constants/config';
 
 const cToF = (c) => (c == null || !Number.isFinite(c) ? null : c * 9 / 5 + 32);
+// pipeline emits slope in °C/min; convert to °F/sec at the boundary
+const slopeCPerMinToFPerSec = (s) =>
+  s == null || !Number.isFinite(s) ? null : (s * 9 / 5) / 60;
 
 export function useTelemetry(url = TELEMETRY_WS_URL) {
   const [state, setState] = useState({
     panF: null,
     meatF: null,
+    slopeFPerSec: null,
     faults: [],
     fsmState: null,
     connected: false,
@@ -49,6 +53,7 @@ export function useTelemetry(url = TELEMETRY_WS_URL) {
           setState({
             panF: cToF(sample?.tc),
             meatF: cToF(sample?.adc),
+            slopeFPerSec: slopeCPerMinToFPerSec(props?.slope),
             faults: Array.isArray(msg?.fault_strings) ? msg.fault_strings : [],
             fsmState: props?.curr_state ?? null,
             connected: true,

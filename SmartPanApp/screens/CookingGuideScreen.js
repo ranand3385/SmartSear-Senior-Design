@@ -42,7 +42,7 @@ const STEP_ORDER = [
 export default function CookingGuideScreen({ navigation, route }) {
   const { meat, doneness, thicknessInches } = route.params;
 
-  const { panF, meatF, connected } = useTelemetry();
+  const { panF, meatF, slopeFPerSec, connected } = useTelemetry();
   // Reactive cook time: scales with live pan temp, falls back to baseline when disconnected
   const livePanF = panF ?? BASE_PAN_TEMP;
   const secondsPerSide = useMemo(
@@ -52,6 +52,20 @@ export default function CookingGuideScreen({ navigation, route }) {
   // Snapshot so mid-cook pan-temp drift doesn't yank the running timer
   const secondsPerSideRef = useRef(secondsPerSide);
   useEffect(() => { secondsPerSideRef.current = secondsPerSide; }, [secondsPerSide]);
+
+  // meatF mirror so the step-entry effect can read the latest probe value
+  // without re-running on every BLE update.
+  const meatFRef = useRef(meatF);
+  useEffect(() => { meatFRef.current = meatF; }, [meatF]);
+  // slope mirror used by the adaptive side-1 flip predictor
+  const slopeFPerSecRef = useRef(slopeFPerSec);
+  useEffect(() => { slopeFPerSecRef.current = slopeFPerSec; }, [slopeFPerSec]);
+
+  // Probe early-end is "armed" only when the probe enters a cook step BELOW
+  // the doneness target. Without this, side 2 instantly auto-ends because the
+  // probe is already at/above target after side 1 — and we still need that
+  // side to actually sear.
+  const earlyEndArmedRef = useRef(false);
 
   const restSeconds = (meat.restMinutes ?? 3) * 60;
 
@@ -121,42 +135,90 @@ export default function CookingGuideScreen({ navigation, route }) {
   // Cleanup on unmount
   useEffect(() => () => { stopSound(); }, [stopSound]);
 
-  // Timer logic — when it hits 0, start jingle and WAIT for user
+  // Timer logic — when it hits 0, start jingle and WAIT for user.
+  // On SIDE 1 the timer ALSO adapts to probe slope: we predict time-to-target
+  // and clamp the displayed timer to ~half of that, so the flip happens at the
+  // temperature midpoint and the meat reaches doneness during side 2.
+  // Timer only ever goes DOWN from this prediction — never up.
+  const MIN_SLOPE_F_PER_SEC = 0.05; // ignore noisy near-flat slopes
   useEffect(() => {
     if (timerRunning) {
       intervalRef.current = setInterval(() => {
         setTimerSecs((s) => {
-          if (s <= 1) {
+          let next = s - 1;
+
+          if (currentStep === STEPS.SIDE_1_TIMER) {
+            const m = meatFRef.current;
+            const slope = slopeFPerSecRef.current;
+            const target = doneness.tempF;
+            if (Number.isFinite(m) && Number.isFinite(slope) && slope > MIN_SLOPE_F_PER_SEC) {
+              if (m >= target) {
+                next = 0; // probe already past target — flip now
+              } else {
+                const timeToTarget = (target - m) / slope;
+                const desiredFlipIn = Math.max(0, Math.floor(timeToTarget * 0.5));
+                if (desiredFlipIn < next) next = desiredFlipIn;
+              }
+            }
+          }
+
+          if (next <= 0) {
             clearInterval(intervalRef.current);
             setTimerRunning(false);
             setTimerDone(true);
             startJingle();
             return 0;
           }
-          return s - 1;
+          return next;
         });
       }, 1000);
     }
     return () => clearInterval(intervalRef.current);
-  }, [timerRunning, startJingle]);
+  }, [timerRunning, currentStep, doneness.tempF, startJingle]);
+
+  // Probe-target early end — only on SIDE 2. Side 1 always runs the full
+  // timer so the first side actually sears. On side 2 we cut the timer short
+  // when the probe reaches the doneness target. Gated on `earlyEndArmedRef`
+  // (set at step entry) so an already-hot probe doesn't instant-skip the sear.
+  useEffect(() => {
+    if (!timerRunning) return;
+    if (currentStep !== STEPS.SIDE_2_TIMER) return;
+    if (!earlyEndArmedRef.current) return;
+    if (meatF == null || !Number.isFinite(meatF)) return;
+    if (meatF >= doneness.tempF) {
+      clearInterval(intervalRef.current);
+      setTimerRunning(false);
+      setTimerSecs(0);
+      setTimerDone(true);
+      startJingle();
+      earlyEndArmedRef.current = false;
+    }
+  }, [meatF, currentStep, timerRunning, doneness.tempF, startJingle]);
 
   // Reset timer when entering a timer step. Read secondsPerSide from ref so
   // a pan-temp update doesn't restart the countdown — we snapshot at step entry.
+  // Arm the probe early-end on entry to SIDE 2 only, and only if probe is
+  // currently below the doneness target (otherwise we'd auto-skip the sear).
   useEffect(() => {
     if (currentStep === STEPS.SIDE_1_TIMER) {
       setTimerSecs(secondsPerSideRef.current);
       setTimerDone(false);
       setTimerRunning(true);
+      earlyEndArmedRef.current = false; // side 1 always runs full duration
     } else if (currentStep === STEPS.SIDE_2_TIMER) {
       setTimerSecs(secondsPerSideRef.current);
       setTimerDone(false);
       setTimerRunning(true);
+      const m = meatFRef.current;
+      earlyEndArmedRef.current =
+        m == null || !Number.isFinite(m) || m < doneness.tempF;
     } else if (currentStep === STEPS.REST) {
       setTimerSecs(restSeconds);
       setTimerDone(false);
       setTimerRunning(true);
+      earlyEndArmedRef.current = false;
     }
-  }, [currentStep, restSeconds]);
+  }, [currentStep, restSeconds, doneness.tempF]);
 
   const handleQuit = () => {
     Alert.alert('Quit Cooking?', 'Are you sure you want to stop?', [
