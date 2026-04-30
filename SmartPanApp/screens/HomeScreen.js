@@ -11,13 +11,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { MEAT_TYPES, DONENESS } from '../constants/meatData';
-
-// DEMO VALUES — replace with actual BLE reads when hardware is ready
-const PAN_TEMPERATURE = 375;
-const PROBE_TEMPERATURE = 142;
-const IS_CONNECTED = true;
+import { useTelemetryContext } from '../contexts/TelemetryContext';
 
 export default function HomeScreen({ navigation }) {
+  const { panC, meatC, connected } = useTelemetryContext();
+  const hasReading = Number.isFinite(panC) && Number.isFinite(meatC);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   // Pulsing animation for the "not connected" indicator
@@ -46,16 +44,31 @@ export default function HomeScreen({ navigation }) {
       <View style={styles.tempCard}>
         <Text style={styles.tempLabel}>PROBE TEMPERATURE</Text>
 
-        {IS_CONNECTED ? (
+        {connected && hasReading ? (
           <>
-            <Text style={styles.tempValue}>{PROBE_TEMPERATURE}°F</Text>
+            {meatC <= 0 ? (
+              <Text style={styles.disconnectedValue}>Disconnected</Text>
+            ) : (
+              <Text style={styles.tempValue}>{Math.round(meatC)}°C</Text>
+            )}
             <View style={styles.divider} />
             <Text style={styles.probeLabel}>PAN TEMPERATURE</Text>
-            <Text style={styles.probeValue}>{PAN_TEMPERATURE}°F</Text>
+            {panC <= 0 ? (
+              <Text style={styles.disconnectedValueSmall}>Disconnected</Text>
+            ) : (
+              <Text style={styles.probeValue}>{Math.round(panC)}°C</Text>
+            )}
+          </>
+        ) : connected ? (
+          <>
+            <Text style={styles.waitingValue}>Waiting for probe…</Text>
+            <View style={styles.divider} />
+            <Text style={styles.probeLabel}>PAN TEMPERATURE</Text>
+            <Text style={styles.waitingValueSmall}>Waiting for probe…</Text>
           </>
         ) : (
           <>
-            <Text style={styles.tempValueDim}>-- °F</Text>
+            <Text style={styles.tempValueDim}>-- °C</Text>
             <Animated.View style={[styles.statusDot, { transform: [{ scale: pulseAnim }] }]} />
             <Text style={styles.statusText}>Pan not connected</Text>
             <Text style={styles.statusSub}>BLE connection coming soon</Text>
@@ -115,7 +128,7 @@ function DonenessChart() {
                       <View style={[chartStyles.bullet, { backgroundColor: d.color }]} />
                       <Text style={chartStyles.donenessLabel}>{d.label}</Text>
                       <Text style={[chartStyles.donenessTemp, { color: d.color }]}>
-                        {d.tempF}°F
+                        {d.tempC}°C
                       </Text>
                     </View>
                   );
@@ -259,6 +272,31 @@ const styles = StyleSheet.create({
     fontSize: 56,
     fontWeight: '700',
     letterSpacing: -2,
+  },
+  waitingValue: {
+    color: '#555',
+    fontSize: 22,
+    fontWeight: '600',
+    fontStyle: 'italic',
+    paddingVertical: 12,
+  },
+  waitingValueSmall: {
+    color: '#555',
+    fontSize: 16,
+    fontWeight: '500',
+    fontStyle: 'italic',
+  },
+  disconnectedValue: {
+    color: '#E74C3C',
+    fontSize: 28,
+    fontWeight: '700',
+    paddingVertical: 8,
+    letterSpacing: -0.5,
+  },
+  disconnectedValueSmall: {
+    color: '#E74C3C',
+    fontSize: 18,
+    fontWeight: '600',
   },
   statusDot: {
     width: 10,

@@ -13,15 +13,17 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { calcCookTimePerSide, formatTime, BASE_PAN_TEMP } from '../utils/cookingCalculator';
-import { useTelemetry } from '../hooks/useTelemetry';
+import { useTelemetryContext } from '../contexts/TelemetryContext';
 import MeatTempChart from '../components/MeatTempChart';
 
 const BEEP_SOUND = require('../assets/sounds/beep.wav');
 
 // Step IDs
 const STEPS = {
+  PREHEAT: 'PREHEAT',
   GREASE_PAN: 'GREASE_PAN',
   ADD_MEAT: 'ADD_MEAT',
+  FAT_CAP_SEAR: 'FAT_CAP_SEAR', // steak-only — replaces ADD_MEAT for steak
   SIDE_1_TIMER: 'SIDE_1_TIMER',
   FLIP_MEAT: 'FLIP_MEAT',
   SIDE_2_TIMER: 'SIDE_2_TIMER',
@@ -29,37 +31,46 @@ const STEPS = {
   DONE: 'DONE',
 };
 
-const STEP_ORDER = [
-  STEPS.GREASE_PAN,
-  STEPS.ADD_MEAT,
-  STEPS.SIDE_1_TIMER,
-  STEPS.FLIP_MEAT,
-  STEPS.SIDE_2_TIMER,
-  STEPS.REST,
-  STEPS.DONE,
-];
+const PREHEAT_TARGET_C = 90;
+
+// Build step order based on meat type. Steak gets a fat-cap-sear step in
+// place of ADD_MEAT so the user renders the fat cap before the flat sear.
+function buildStepOrder(meatId) {
+  const placement = meatId === 'steak' ? STEPS.FAT_CAP_SEAR : STEPS.ADD_MEAT;
+  return [
+    STEPS.PREHEAT,
+    STEPS.GREASE_PAN,
+    placement,
+    STEPS.SIDE_1_TIMER,
+    STEPS.FLIP_MEAT,
+    STEPS.SIDE_2_TIMER,
+    STEPS.REST,
+    STEPS.DONE,
+  ];
+}
 
 export default function CookingGuideScreen({ navigation, route }) {
   const { meat, doneness, thicknessInches } = route.params;
+  const stepOrder = useMemo(() => buildStepOrder(meat.id), [meat.id]);
 
-  const { panF, meatF, slopeFPerSec, connected } = useTelemetry();
+  const { panC, meatC, slopeCPerSec, connected } = useTelemetryContext();
   // Reactive cook time: scales with live pan temp, falls back to baseline when disconnected
-  const livePanF = panF ?? BASE_PAN_TEMP;
+  const livePanC = panC ?? BASE_PAN_TEMP;
   const secondsPerSide = useMemo(
-    () => calcCookTimePerSide(meat.id, doneness.id, thicknessInches, livePanF),
-    [meat.id, doneness.id, thicknessInches, livePanF]
+    () => calcCookTimePerSide(meat.id, doneness.id, thicknessInches, livePanC),
+    [meat.id, doneness.id, thicknessInches, livePanC]
   );
   // Snapshot so mid-cook pan-temp drift doesn't yank the running timer
   const secondsPerSideRef = useRef(secondsPerSide);
   useEffect(() => { secondsPerSideRef.current = secondsPerSide; }, [secondsPerSide]);
 
-  // meatF mirror so the step-entry effect can read the latest probe value
+  // meatC mirror so the step-entry effect can read the latest probe value
   // without re-running on every BLE update.
-  const meatFRef = useRef(meatF);
-  useEffect(() => { meatFRef.current = meatF; }, [meatF]);
+  const meatCRef = useRef(meatC);
+  useEffect(() => { meatCRef.current = meatC; }, [meatC]);
   // slope mirror used by the adaptive side-1 flip predictor
-  const slopeFPerSecRef = useRef(slopeFPerSec);
-  useEffect(() => { slopeFPerSecRef.current = slopeFPerSec; }, [slopeFPerSec]);
+  const slopeCPerSecRef = useRef(slopeCPerSec);
+  useEffect(() => { slopeCPerSecRef.current = slopeCPerSec; }, [slopeCPerSec]);
 
   // Probe early-end is "armed" only when the probe enters a cook step BELOW
   // the doneness target. Without this, side 2 instantly auto-ends because the
@@ -70,7 +81,7 @@ export default function CookingGuideScreen({ navigation, route }) {
   const restSeconds = (meat.restMinutes ?? 3) * 60;
 
   const [stepIndex, setStepIndex] = useState(0);
-  const currentStep = STEP_ORDER[stepIndex];
+  const currentStep = stepOrder[stepIndex];
 
   const [timerSecs, setTimerSecs] = useState(secondsPerSide);
   const [timerRunning, setTimerRunning] = useState(false);
@@ -114,8 +125,8 @@ export default function CookingGuideScreen({ navigation, route }) {
       Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
       Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: true }),
     ]).start();
-    setStepIndex((i) => Math.min(i + 1, STEP_ORDER.length - 1));
-  }, [fadeAnim]);
+    setStepIndex((i) => Math.min(i + 1, stepOrder.length - 1));
+  }, [fadeAnim, stepOrder.length]);
 
   // Skip — same UX as natural timer expiry: jingle loops until user taps Continue
   const skipStep = useCallback(async () => {
@@ -135,29 +146,41 @@ export default function CookingGuideScreen({ navigation, route }) {
   // Cleanup on unmount
   useEffect(() => () => { stopSound(); }, [stopSound]);
 
-  // Timer logic — when it hits 0, start jingle and WAIT for user.
-  // On SIDE 1 the timer ALSO adapts to probe slope: we predict time-to-target
-  // and clamp the displayed timer to ~half of that, so the flip happens at the
-  // temperature midpoint and the meat reaches doneness during side 2.
-  // Timer only ever goes DOWN from this prediction — never up.
-  const MIN_SLOPE_F_PER_SEC = 0.05; // ignore noisy near-flat slopes
+  // Timer logic. Both cook timers default to a plain 1 s/sec countdown from
+  // the static `secondsPerSide` seed. Two probe-driven adjustments layer on:
+  //   1. End early — if probe reaches the side's target temp, end immediately
+  //      (gated by earlyEndArmedRef on side 2 to avoid auto-skipping a sear
+  //      when probe was already past target on entry).
+  //   2. Extend in the last 30 s — when ≤ 30 s remain, if probe isn't on track
+  //      to reach target by timer end, extend the timer to the predicted ETA.
+  //   SIDE 1 target = doneness.flipTempC, SIDE 2 target = doneness.tempC.
+  //   REST: plain countdown.
+  const MIN_SLOPE_C_PER_SEC = 0.03; // ignore noisy near-flat slopes (~1.6 °C/min)
+  const ADJUST_WHEN_REMAINING_S = 30;
+
   useEffect(() => {
     if (timerRunning) {
       intervalRef.current = setInterval(() => {
         setTimerSecs((s) => {
           let next = s - 1;
 
-          if (currentStep === STEPS.SIDE_1_TIMER) {
-            const m = meatFRef.current;
-            const slope = slopeFPerSecRef.current;
-            const target = doneness.tempF;
-            if (Number.isFinite(m) && Number.isFinite(slope) && slope > MIN_SLOPE_F_PER_SEC) {
-              if (m >= target) {
-                next = 0; // probe already past target — flip now
-              } else {
+          if (currentStep === STEPS.SIDE_1_TIMER || currentStep === STEPS.SIDE_2_TIMER) {
+            const isSide2 = currentStep === STEPS.SIDE_2_TIMER;
+            const target = isSide2 ? doneness.tempC : doneness.flipTempC;
+            const cookActive = !isSide2 || earlyEndArmedRef.current; // side 2 falls back to plain countdown when not armed
+            const m = meatCRef.current;
+            const slope = slopeCPerSecRef.current;
+
+            if (cookActive) {
+              if (Number.isFinite(m) && m >= target) {
+                next = 0; // probe reached target — end this side
+              } else if (next > 0
+                  && next <= ADJUST_WHEN_REMAINING_S
+                  && Number.isFinite(m)
+                  && Number.isFinite(slope)
+                  && slope > MIN_SLOPE_C_PER_SEC) {
                 const timeToTarget = (target - m) / slope;
-                const desiredFlipIn = Math.max(0, Math.floor(timeToTarget * 0.5));
-                if (desiredFlipIn < next) next = desiredFlipIn;
+                if (timeToTarget > next) next = Math.ceil(timeToTarget);
               }
             }
           }
@@ -174,28 +197,35 @@ export default function CookingGuideScreen({ navigation, route }) {
       }, 1000);
     }
     return () => clearInterval(intervalRef.current);
-  }, [timerRunning, currentStep, doneness.tempF, startJingle]);
+  }, [timerRunning, currentStep, doneness.flipTempC, doneness.tempC, startJingle]);
 
-  // Probe-target early end — only on SIDE 2. Side 1 always runs the full
-  // timer so the first side actually sears. On side 2 we cut the timer short
-  // when the probe reaches the doneness target. Gated on `earlyEndArmedRef`
-  // (set at step entry) so an already-hot probe doesn't instant-skip the sear.
+  // Auto-advance from PREHEAT on a *rising edge* through the target temp.
+  // We require panC to have been observed below the target at some point first,
+  // so a hot pan at screen-entry doesn't instantly skip the preheat step.
+  // (User can still tap "Skip preheat" to bypass manually.)
+  const preheatAdvancedRef = useRef(false);
+  const preheatSeenBelowRef = useRef(false);
   useEffect(() => {
-    if (!timerRunning) return;
-    if (currentStep !== STEPS.SIDE_2_TIMER) return;
-    if (!earlyEndArmedRef.current) return;
-    if (meatF == null || !Number.isFinite(meatF)) return;
-    if (meatF >= doneness.tempF) {
-      clearInterval(intervalRef.current);
-      setTimerRunning(false);
-      setTimerSecs(0);
-      setTimerDone(true);
-      startJingle();
-      earlyEndArmedRef.current = false;
+    if (currentStep !== STEPS.PREHEAT) {
+      preheatAdvancedRef.current = false;
+      preheatSeenBelowRef.current = false;
+      return;
     }
-  }, [meatF, currentStep, timerRunning, doneness.tempF, startJingle]);
+    if (preheatAdvancedRef.current) return;
+    if (!Number.isFinite(panC)) return;
 
-  // Reset timer when entering a timer step. Read secondsPerSide from ref so
+    if (panC < PREHEAT_TARGET_C) {
+      preheatSeenBelowRef.current = true;
+      return;
+    }
+    // panC >= target — only fire if we've seen "below" first (rising edge)
+    if (preheatSeenBelowRef.current) {
+      preheatAdvancedRef.current = true;
+      nextStep();
+    }
+  }, [currentStep, panC, nextStep]);
+
+// Reset timer when entering a timer step. Read secondsPerSide from ref so
   // a pan-temp update doesn't restart the countdown — we snapshot at step entry.
   // Arm the probe early-end on entry to SIDE 2 only, and only if probe is
   // currently below the doneness target (otherwise we'd auto-skip the sear).
@@ -209,16 +239,16 @@ export default function CookingGuideScreen({ navigation, route }) {
       setTimerSecs(secondsPerSideRef.current);
       setTimerDone(false);
       setTimerRunning(true);
-      const m = meatFRef.current;
+      const m = meatCRef.current;
       earlyEndArmedRef.current =
-        m == null || !Number.isFinite(m) || m < doneness.tempF;
+        m == null || !Number.isFinite(m) || m < doneness.tempC;
     } else if (currentStep === STEPS.REST) {
       setTimerSecs(restSeconds);
       setTimerDone(false);
       setTimerRunning(true);
       earlyEndArmedRef.current = false;
     }
-  }, [currentStep, restSeconds, doneness.tempF]);
+  }, [currentStep, restSeconds, doneness.tempC]);
 
   const handleQuit = () => {
     Alert.alert('Quit Cooking?', 'Are you sure you want to stop?', [
@@ -232,7 +262,7 @@ export default function CookingGuideScreen({ navigation, route }) {
   };
 
   // Progress bar percentage
-  const progress = stepIndex / (STEP_ORDER.length - 1);
+  const progress = stepIndex / (stepOrder.length - 1);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -266,34 +296,61 @@ export default function CookingGuideScreen({ navigation, route }) {
           doneness={doneness}
           timerSecs={timerSecs}
           timerRunning={timerRunning}
+          panC={panC}
           onNext={nextStep}
         />
       </Animated.View>
 
       {/* Action Button — shown only on instruction steps (not timers) */}
-      {(currentStep === STEPS.GREASE_PAN || currentStep === STEPS.ADD_MEAT || currentStep === STEPS.FLIP_MEAT) && (
+      {(currentStep === STEPS.GREASE_PAN
+          || currentStep === STEPS.ADD_MEAT
+          || currentStep === STEPS.FAT_CAP_SEAR
+          || currentStep === STEPS.FLIP_MEAT) && (
         <TouchableOpacity style={styles.confirmBtn} onPress={nextStep} activeOpacity={0.85}>
           <Ionicons name="checkmark" size={22} color="#fff" />
           <Text style={styles.confirmBtnText}>Done</Text>
         </TouchableOpacity>
       )}
 
+      {/* PREHEAT — auto-advances at target temp; skip in case BLE is silent */}
+      {currentStep === STEPS.PREHEAT && (
+        <TouchableOpacity style={styles.skipBtn} onPress={nextStep} activeOpacity={0.7}>
+          <Ionicons name="play-skip-forward-outline" size={18} color="#888" />
+          <Text style={styles.skipBtnText}>Skip preheat</Text>
+        </TouchableOpacity>
+      )}
+
       {/* Temp strip + chart + Skip — shown on all timer steps */}
       {(currentStep === STEPS.SIDE_1_TIMER || currentStep === STEPS.SIDE_2_TIMER || currentStep === STEPS.REST) && (
         <>
-          <MeatTempChart meatF={meatF} width={Dimensions.get('window').width - 40} height={140} />
+          <MeatTempChart meatC={meatC} width={Dimensions.get('window').width - 40} height={140} />
           <View style={styles.tempStrip}>
             <View style={styles.tempCell}>
               <Text style={styles.tempStripLabel}>PROBE</Text>
-              <Text style={styles.tempStripValue}>
-                {meatF == null ? '—' : `${Math.round(meatF)}°F`}
+              <Text style={[
+                styles.tempStripValue,
+                meatC != null && meatC <= 0 && styles.tempStripDisconnected,
+              ]}>
+                {meatC == null
+                  ? '—'
+                  : meatC <= 0
+                    ? 'Disconnected'
+                    : `${Math.round(meatC)}°C`}
               </Text>
             </View>
             <View style={styles.tempCellDivider} />
             <View style={styles.tempCell}>
               <Text style={styles.tempStripLabel}>PAN</Text>
-              <Text style={[styles.tempStripValue, { color: '#4FC3F7' }]}>
-                {panF == null ? '—' : `${Math.round(panF)}°F`}
+              <Text style={[
+                styles.tempStripValue,
+                { color: '#4FC3F7' },
+                panC != null && panC <= 0 && styles.tempStripDisconnected,
+              ]}>
+                {panC == null
+                  ? '—'
+                  : panC <= 0
+                    ? 'Disconnected'
+                    : `${Math.round(panC)}°C`}
               </Text>
             </View>
           </View>
@@ -326,16 +383,30 @@ export default function CookingGuideScreen({ navigation, route }) {
 
 // ─── Step Content Component ──────────────────────────────────────────────────
 
-function StepContent({ step, meat, doneness, timerSecs, timerRunning, onNext }) {
+function StepContent({ step, meat, doneness, timerSecs, timerRunning, panC, onNext }) {
   switch (step) {
+    case STEPS.PREHEAT:
+      return (
+        <>
+          <InstructionCard
+            icon="flame-outline"
+            iconColor="#FF6B35"
+            title="Preheating"
+            body={`Heat your SmartPan until it reaches ${PREHEAT_TARGET_C}°C. We'll move on automatically once it's hot enough.`}
+            tip="A properly preheated pan gives you a clean, even sear."
+          />
+          <PreheatPanel panC={panC} targetC={PREHEAT_TARGET_C} />
+        </>
+      );
+
     case STEPS.GREASE_PAN:
       return (
         <InstructionCard
           icon="water-outline"
           iconColor="#4FC3F7"
           title="Grease the pan"
-          body={`Add a thin layer of oil or butter to your SmartPan and let it heat up before adding the ${meat.label.toLowerCase()}.`}
-          tip="A drop of water should sizzle and evaporate immediately when the pan is ready."
+          body={`Add a thin layer of oil or butter to your SmartPan before adding the ${meat.label.toLowerCase()}.`}
+          tip="The oil should shimmer almost immediately on contact."
         />
       );
 
@@ -347,6 +418,20 @@ function StepContent({ step, meat, doneness, timerSecs, timerRunning, onNext }) 
           title={`Add the ${meat.label}`}
           body={`Place your ${meat.label.toLowerCase()} in the center of the pan. Press gently to ensure full contact with the surface.`}
           tip="Don't move the meat — let it sear undisturbed for best results."
+        />
+      );
+
+    case STEPS.FAT_CAP_SEAR:
+      return (
+        <InstructionCard
+          icon="layers-outline"
+          iconColor="#F39C12"
+          title="Sear fat cap & sides"
+          body={
+            "Hold the steak upright with tongs and start with the fat cap down — render until glossy and golden (30–60 s). " +
+            "Then rotate and sear each remaining narrow side for 15–20 s, until all edges are browned."
+          }
+          tip="Crisping every edge first builds flavor and primes the surface before the flat sear."
         />
       );
 
@@ -375,7 +460,7 @@ function StepContent({ step, meat, doneness, timerSecs, timerRunning, onNext }) 
             iconColor="#CE93D8"
             title="Remove & Rest"
             body={`Remove the ${meat.label.toLowerCase()} from the pan and let it rest. Resting locks in the juices.`}
-            tip={`Target internal temp: ${doneness.tempF}°F`}
+            tip={`Target internal temp: ${doneness.tempC}°C`}
           />
           <View style={styles.restTimerWrapper}>
             <TimerCard title="Resting" secs={timerSecs} running={timerRunning} compact />
@@ -393,7 +478,7 @@ function StepContent({ step, meat, doneness, timerSecs, timerRunning, onNext }) 
             <Text style={[styles.donenessHighlight, { color: doneness.color }]}>
               {doneness.label.toLowerCase()}
             </Text>{' '}
-            at {doneness.tempF}°F.
+            at {doneness.tempC}°C.
           </Text>
           <Text style={styles.doneSub2}>{doneness.description}</Text>
         </View>
@@ -445,6 +530,109 @@ const instrStyles = StyleSheet.create({
   body: { color: '#999', fontSize: 15, lineHeight: 22, textAlign: 'center' },
   tipRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   tipText: { color: '#FF6B35', fontSize: 13 },
+});
+
+// ─── Preheat Panel (GREASE_PAN step) ─────────────────────────────────────────
+
+function PreheatPanel({ panC, targetC = 110 }) {
+  const valid = Number.isFinite(panC);
+  const disconnected = valid && panC <= 0;
+  const ready = valid && !disconnected && panC >= targetC;
+
+  let valueText;
+  if (!valid) valueText = '—';
+  else if (disconnected) valueText = 'Disconnected';
+  else valueText = `${Math.round(panC)}°C`;
+
+  let statusText;
+  if (!valid) statusText = `Heat pan to ${targetC}°C`;
+  else if (disconnected) statusText = `Reconnect pan — target ${targetC}°C`;
+  else if (ready) statusText = `Ready — pan at ${targetC}°C`;
+  else statusText = `Heat pan to ${targetC}°C`;
+
+  // Progress fill: 0 at ambient (20°C), 100% at target
+  const AMBIENT = 20;
+  const pct = !valid || disconnected
+    ? 0
+    : Math.max(0, Math.min(1, (panC - AMBIENT) / (targetC - AMBIENT)));
+
+  return (
+    <View style={preheatStyles.card}>
+      <Text style={preheatStyles.label}>PAN TEMPERATURE</Text>
+      <Text style={[
+        preheatStyles.value,
+        ready && preheatStyles.valueReady,
+        disconnected && preheatStyles.valueDisconnected,
+      ]}>
+        {valueText}
+      </Text>
+      <View style={preheatStyles.progressTrack}>
+        <View
+          style={[
+            preheatStyles.progressFill,
+            { width: `${pct * 100}%` },
+            ready && preheatStyles.progressFillReady,
+          ]}
+        />
+      </View>
+      <View style={preheatStyles.statusRow}>
+        <Ionicons
+          name={ready ? 'checkmark-circle' : 'flame-outline'}
+          size={14}
+          color={ready ? '#4CAF50' : '#FF6B35'}
+        />
+        <Text style={[preheatStyles.statusText, ready && preheatStyles.statusTextReady]}>
+          {statusText}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+const preheatStyles = StyleSheet.create({
+  card: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 16,
+    padding: 18,
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    marginTop: 14,
+  },
+  label: {
+    color: '#666',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 2,
+  },
+  value: {
+    color: '#4FC3F7',
+    fontSize: 36,
+    fontWeight: '700',
+    letterSpacing: -1,
+  },
+  valueReady: { color: '#4CAF50' },
+  valueDisconnected: { color: '#E74C3C', fontSize: 22 },
+  progressTrack: {
+    width: '100%',
+    height: 4,
+    backgroundColor: '#2a2a2a',
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginTop: 4,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#FF6B35',
+    borderRadius: 2,
+  },
+  progressFillReady: {
+    backgroundColor: '#4CAF50',
+  },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  statusText: { color: '#FF6B35', fontSize: 13, fontWeight: '600' },
+  statusTextReady: { color: '#4CAF50' },
 });
 
 // ─── Timer Card ──────────────────────────────────────────────────────────────
@@ -613,6 +801,11 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     letterSpacing: -0.5,
+  },
+  tempStripDisconnected: {
+    color: '#E74C3C',
+    fontSize: 14,
+    letterSpacing: 0,
   },
   continueBtn: {
     backgroundColor: '#FF6B35',

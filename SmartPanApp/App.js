@@ -3,6 +3,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import { TelemetryProvider } from './contexts/TelemetryContext';
 
 // Cook tab
 import HomeScreen from './screens/HomeScreen';
@@ -61,8 +62,9 @@ function RecipesStack() {
 
 export default function App() {
   return (
-    <NavigationContainer>
-      <Tab.Navigator
+    <TelemetryProvider>
+      <NavigationContainer>
+        <Tab.Navigator
         screenOptions={({ route }) => ({
           headerShown: false,
           tabBarStyle: {
@@ -86,7 +88,8 @@ export default function App() {
         <Tab.Screen name="Cook" component={HomeStack} />
         <Tab.Screen name="Macros" component={MacrosStack} />
         <Tab.Screen name="Recipes" component={RecipesStack} />
-      </Tab.Navigator>
-    </NavigationContainer>
+        </Tab.Navigator>
+      </NavigationContainer>
+    </TelemetryProvider>
   );
 }

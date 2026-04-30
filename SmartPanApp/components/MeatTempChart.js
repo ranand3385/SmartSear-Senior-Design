@@ -3,12 +3,12 @@ import { View, Text, StyleSheet } from 'react-native';
 import Svg, { Path, Line, Text as SvgText } from 'react-native-svg';
 
 const CHART_WINDOW_SECS = 120;
-const MAX_JUMP_F = 14;        // ≈ 8 °C/s — physical max for a meat probe
-const MIN_PLAUSIBLE_F = 32;
-const MAX_PLAUSIBLE_F = 392;
-const MIN_Y_RANGE_F = 20;     // keep flat-line traces from going full-bleed
+const MAX_JUMP_C = 8;          // physical max rate of change for a meat probe
+const MIN_PLAUSIBLE_C = 0;
+const MAX_PLAUSIBLE_C = 200;
+const MIN_Y_RANGE_C = 12;      // keep flat-line traces from going full-bleed
 
-export default function MeatTempChart({ meatF, width = 320, height = 140 }) {
+export default function MeatTempChart({ meatC, width = 320, height = 140 }) {
   const samplesRef = useRef([]);
   const seriesRef = useRef([]);
   const lastAcceptedRef = useRef(null);
@@ -17,8 +17,8 @@ export default function MeatTempChart({ meatF, width = 320, height = 140 }) {
 
   // Capture every reading the hook emits
   useEffect(() => {
-    if (Number.isFinite(meatF)) samplesRef.current.push(meatF);
-  }, [meatF]);
+    if (Number.isFinite(meatC)) samplesRef.current.push(meatC);
+  }, [meatC]);
 
   // 1 Hz aggregate + outlier filter
   useEffect(() => {
@@ -33,11 +33,11 @@ export default function MeatTempChart({ meatF, width = 320, height = 140 }) {
       const candidate = samples.reduce((a, b) => a + b, 0) / samples.length;
       let accepted;
 
-      if (candidate < MIN_PLAUSIBLE_F || candidate > MAX_PLAUSIBLE_F) {
+      if (candidate < MIN_PLAUSIBLE_C || candidate > MAX_PLAUSIBLE_C) {
         accepted = lastAcceptedRef.current;
       } else if (lastAcceptedRef.current == null) {
         accepted = candidate;
-      } else if (Math.abs(candidate - lastAcceptedRef.current) > MAX_JUMP_F) {
+      } else if (Math.abs(candidate - lastAcceptedRef.current) > MAX_JUMP_C) {
         const series = seriesRef.current;
         const ravg = series.length > 0
           ? series.reduce((s, p) => s + p.t, 0) / series.length
@@ -72,10 +72,10 @@ export default function MeatTempChart({ meatF, width = 320, height = 140 }) {
     const temps = series.map((p) => p.t);
     let yMin = Math.min(...temps);
     let yMax = Math.max(...temps);
-    if (yMax - yMin < MIN_Y_RANGE_F) {
+    if (yMax - yMin < MIN_Y_RANGE_C) {
       const mid = (yMin + yMax) / 2;
-      yMin = mid - MIN_Y_RANGE_F / 2;
-      yMax = mid + MIN_Y_RANGE_F / 2;
+      yMin = mid - MIN_Y_RANGE_C / 2;
+      yMax = mid + MIN_Y_RANGE_C / 2;
     }
     const xMin = series[0].x;
     const xMax = Math.max(xMin + 1, series[series.length - 1].x);

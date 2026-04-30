@@ -44,47 +44,55 @@ export const MEAT_TYPES = [
   },
 ];
 
-// Doneness definitions with target internal temp and display info
+// Doneness definitions with target internal temp (°C) and display info.
+// `flipTempC` is the probe temperature at which side 1 should end. Calibrated
+// for a 1" steak — medium_rare lands at 33 °C per the heat-equation flip rule;
+// other doneness levels step up evenly.
 export const DONENESS = {
   rare: {
     id: 'rare',
     label: 'Rare',
-    tempF: 125,
+    tempC: 52,
+    flipTempC: 30,
     color: '#C0392B',
     description: 'Cool red center',
   },
   medium_rare: {
     id: 'medium_rare',
     label: 'Medium Rare',
-    tempF: 135,
+    tempC: 57,
+    flipTempC: 33,
     color: '#E74C3C',
     description: 'Warm red center',
   },
   medium: {
     id: 'medium',
     label: 'Medium',
-    tempF: 145,
+    tempC: 63,
+    flipTempC: 36,
     color: '#E67E22',
     description: 'Pink center',
   },
   medium_well: {
     id: 'medium_well',
     label: 'Medium Well',
-    tempF: 150,
+    tempC: 66,
+    flipTempC: 39,
     color: '#F39C12',
     description: 'Slightly pink center',
   },
   well_done: {
     id: 'well_done',
     label: 'Well Done',
-    tempF: 160,
+    tempC: 71,
+    flipTempC: 42,
     color: '#7F8C8D',
     description: 'No pink, fully cooked',
   },
 };
 
 // Cook time in minutes per side, per inch of thickness
-// Assumes pan at ~375°F
+// Assumes pan at ~190°C (calibration baseline)
 export const COOK_TIME_PER_INCH = {
   steak: {
     rare: 2.0,

@@ -86,17 +86,11 @@ def _clean(o: Any) -> Any:
 
 
 async def run(args: argparse.Namespace) -> None:
-    print(f"[ble] scanning for {args.scan_seconds:.0f}s...")
-    dev = await BleakScanner.find_device_by_filter(
-        _candidate_matcher(args.name, args.address), timeout=args.scan_seconds
-    )
-    if not dev:
-        raise RuntimeError(
-            "No BLE device matched. Pass --address from `bleak`'s discovery output."
-        )
+    # We don't pre-emptively kill connections that are quietly waiting — some
+    # peripherals are slow to send the first packet. We rely on bleak raising
+    # on actual disconnect, which we catch and reconnect from.
+    RECONNECT_BACKOFF_S = 5.0
 
-    pipeline = Pipeline()
-    queue: asyncio.Queue[bytearray] = asyncio.Queue(maxsize=200)
     clients: Set[Any] = set()
 
     async def ws_handler(websocket):
@@ -121,28 +115,52 @@ async def run(args: argparse.Namespace) -> None:
         for ws in dead:
             clients.discard(ws)
 
+    async def ble_session() -> bool:
+        """Run one BLE connection cycle. Returns True if it stalled (we want to retry)."""
+        print(f"[ble] scanning for {args.scan_seconds:.0f}s...")
+        dev = await BleakScanner.find_device_by_filter(
+            _candidate_matcher(args.name, args.address), timeout=args.scan_seconds
+        )
+        if not dev:
+            print(f"[ble] no matching device — retry in {RECONNECT_BACKOFF_S:.0f}s")
+            return True
+
+        pipeline = Pipeline()  # reset filter state on each reconnect
+        queue: asyncio.Queue[bytearray] = asyncio.Queue(maxsize=200)
+        try:
+            async with BleakClient(dev) as client:
+                print(f"[ble] connected: {dev.address}")
+
+                def on_notify(_handle: int, data: bytearray) -> None:
+                    if queue.full():
+                        _ = queue.get_nowait()
+                    queue.put_nowait(data)
+
+                await client.start_notify(CHAR_UUID, on_notify)
+                print("[ble] subscribed; streaming to WS clients")
+                try:
+                    while True:
+                        data = await queue.get()  # block indefinitely
+                        pkt = pipeline.decode_packet(data)
+                        if not pkt:
+                            continue
+                        state = pipeline.process_packet(pkt)
+                        payload = json.dumps(_clean(state.as_dict()))
+                        await broadcast(payload)
+                finally:
+                    try:
+                        await client.stop_notify(CHAR_UUID)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[ble] session error: {type(e).__name__}: {e}")
+            return True
+
     async def ble_loop():
-        async with BleakClient(dev) as client:
-            print(f"[ble] connected: {dev.address}")
-
-            def on_notify(_handle: int, data: bytearray) -> None:
-                if queue.full():
-                    _ = queue.get_nowait()
-                queue.put_nowait(data)
-
-            await client.start_notify(CHAR_UUID, on_notify)
-            print("[ble] subscribed; streaming to WS clients")
-            try:
-                while True:
-                    data = await queue.get()
-                    pkt = pipeline.decode_packet(data)
-                    if not pkt:
-                        continue
-                    state = pipeline.process_packet(pkt)
-                    payload = json.dumps(_clean(state.as_dict()))
-                    await broadcast(payload)
-            finally:
-                await client.stop_notify(CHAR_UUID)
+        while True:
+            stalled = await ble_session()
+            if stalled:
+                await asyncio.sleep(RECONNECT_BACKOFF_S)
 
     async with websockets.serve(ws_handler, "0.0.0.0", args.port):
         print(f"[ws] listening on ws://0.0.0.0:{args.port}")
