@@ -1,25 +1,16 @@
-# SmartSear
+# Smart Sear
 
-A closed-loop smart cooking system built on an ESP32. A thermocouple under the pan and a
-probe in the meat measure temperature. A controller turns the stove knob with a stepper
-motor to hold the pan at a target temperature. Live data reaches a mobile app that guides
-the cook step by step, and the system fails safe when a sensor faults or the pan overheats.
+Closed-loop smart cooking system built on an ESP32. A thermocouple under the pan and a probe in the meat feed a firmware state machine that drives a stepper motor on the stovetop knob, streams live data over Bluetooth Low Energy to a mobile app, and fails safe when a sensor faults or the pan overheats.
 
-![SmartSear on the bench: pan, meat probe, LCD enclosure, stepper on the stove knob, and the mobile app](docs/images/system-overview.jpg)
+![Smart Sear system on the bench: pan, meat probe, LCD, stepper on the stove knob, and the mobile app](docs/images/system-overview.jpg)
 
 ## What it does
 
-- **Two temperature inputs:** a Type K thermocouple on the pan and an NTC thermistor
-  probe in the food.
-- **Closed-loop heat control:** a PI controller turns the stove knob through a stepper
-  motor to hold a target pan temperature.
-- **Guided cooking:** the app walks the cook through preheat, sear, flip, second sear and
-  rest. It adjusts its timers from live probe data.
-- **Fail-safe behavior:** if the pan overheats or a sensor disconnects, the knob is
-  driven to its lowest setting and the LCD shows the fault. The app also raises a
-  full-screen alarm when the pan gets too hot.
-- **Nutrition tracking:** the app logs macros from UPC barcode scans or a food-database
-  search.
+- **Two temperature inputs:** a Type K thermocouple on the pan and an NTC thermistor probe in the food
+- **Closed-loop heat control:** a PI controller turns the stove knob through a stepper motor to hold a target pan temperature
+- **Guided cooking:** a firmware state machine walks the cook through preheat, sear, flip, second sear, and rest, and the app prompts each transition
+- **Fail-safe behavior:** on over-temperature or a disconnected sensor, the knob is driven to its lowest setting, the LCD shows the fault, and the app switches to manual instructions
+- **Nutrition tracking:** the app logs macros from UPC barcode scans or manual entry
 
 ## Architecture
 
@@ -30,68 +21,20 @@ the cook step by step, and the system fails safe when a sensor faults or the pan
 | Data collection | Thermocouple and thermistor sensing, calibration |
 | PCB and power | Custom ESP32-S3 board, 5 V input, 3.3 V LDO rail, sensor and display connectors |
 | Feedback control | PI control of pan temperature through a stepper-driven stove knob |
-| Data processing | BLE decoding, filtering, feature extraction, cooking state machine, fault detection |
+| Data processing | Filtering, feature extraction, cooking state machine, safety events, BLE transport |
 | Mobile app | Guided cooking, live temperatures, alerts, recipes, macro tracking |
-
-### Data path
-
-The board talks Bluetooth Low Energy (BLE) to a host computer. The host runs the data
-pipeline and serves the results to the phone over WebSocket.
-
-```mermaid
-flowchart LR
-    subgraph pan["Smart pan (custom PCB)"]
-        tc["Thermocouple<br/>MAX31855K over SPI"]
-        probe["NTC thermistor probe<br/>ESP32 ADC"]
-        esp["ESP32-S3<br/>ESP-IDF + NimBLE"]
-        stepper["Geared stepper + ULN2803A<br/>turns the stove knob"]
-        lcd["TFT LCD<br/>temps + faults"]
-    end
-
-    subgraph host["Host computer"]
-        pipeline["BLE pipeline<br/>decode, filter, slope, faults, FSM"]
-        bridge["ble_ws_bridge.py<br/>WebSocket server"]
-        mock["mock_telemetry.py<br/>hardware-free testing"]
-    end
-
-    subgraph phone["Phone app (Expo / React Native)"]
-        provider["TelemetryProvider<br/>one shared WebSocket"]
-        guide["Cooking guide<br/>adaptive timers"]
-        alarm["Overtemp alarm"]
-        chart["Live probe chart"]
-    end
-
-    tc --> esp
-    probe --> esp
-    esp --> stepper
-    esp --> lcd
-    esp -->|"BLE GATT notifications"| pipeline
-    pipeline --> bridge
-    bridge -->|"JSON over WebSocket"| provider
-    mock -.->|"same JSON shape"| provider
-    provider --> guide
-    provider --> alarm
-    provider --> chart
-```
-
-The firmware and the host-side data pipeline are in a companion repo,
-[`sophiezhou1/ece-design`](https://github.com/sophiezhou1/ece-design). This repo holds the
-mobile app and the host tools that connect the two.
 
 ### Hardware
 
-![Hardware block diagram, from the design stage (the built system uses a stepper motor rather than the servo shown)](docs/images/hardware-block-diagram.png)
-
-*This block diagram is from the design stage. The built system uses a geared stepper
-motor in place of the servo shown.*
+![Hardware block diagram](docs/images/hardware-block-diagram.png)
 
 | Component | Part | Interface |
 | --- | --- | --- |
-| Microcontroller | ESP32-S3-WROOM-1 (N8R8) | BLE to the host |
-| Pan sensor | Type K thermocouple + MAX31855K amplifier breakout | SPI |
-| Food sensor | NTC thermistor probe (2.5 mm jack), 100 kΩ voltage divider + RC filter | ADC |
-| Actuator | 28BYJ-48 geared stepper via ULN2803A driver, 3D-printed knob mount | GPIO step patterns |
-| Display | 320×240 color TFT LCD | SPI |
+| Microcontroller | ESP32-S3-WROOM-1 | BLE to the app |
+| Pan sensor | Type K thermocouple + MAX31855K amplifier | SPI |
+| Food sensor | NTC thermistor probe (2.5 mm jack), voltage divider + RC filter | ADC |
+| Actuator | Geared stepper motor via ULN2803A driver, 3D-printed knob mount | GPIO step patterns |
+| Display | Color TFT LCD | |
 | Power | 5 V wall adapter, AP2112K-3.3 LDO regulator | |
 
 ## Custom PCB
@@ -100,18 +43,13 @@ motor in place of the servo shown.*
 | --- | --- | --- |
 | ![Schematic](docs/images/schematic.png) | ![PCB layout](docs/images/pcb-layout.png) | ![Assembled board](docs/images/pcb-assembled.jpg) |
 
-The board carries the ESP32-S3 module, the 3.3 V LDO, the thermistor conditioning and the
-stepper driver. It has connectors for the wall adapter, thermocouple breakout, food probe,
-stepper and display.
+The board carries the ESP32-S3 module, the 3.3 V LDO, thermistor conditioning, the stepper driver, and connectors for the wall adapter, thermocouple breakout, food probe, and display.
 
-**Power redesign.** The first revision ran on a 3.7 V LiPo battery with a charger board.
-The final design moved to a 5 V wall adapter and a single LDO. That meant fewer parts and
-no runtime limit, at the cost of efficiency that only mattered on battery. Validation:
+**Power redesign.** The first revision ran on a 3.7 V LiPo with a charger board. The final design moved to a 5 V wall adapter and a single LDO: fewer parts and no runtime limit, at the cost of efficiency that only mattered on battery. Validation:
 
-- The 3.3 V rail held within ±5% under load, measured with a DMM.
-- No brownout resets while the radio was transmitting, checked with an oscilloscope on
-  the ESP32's 3.3 V pin.
-- The stepper motor received a stable 5 V.
+- 3.3 V rail held within ±5% under load, measured with a DMM
+- No brownout resets while the radio was transmitting, checked with an oscilloscope on the ESP32 3V3 pin
+- Stable 5 V delivered to the stepper motor
 
 ## Sensing and calibration
 
@@ -119,36 +57,19 @@ no runtime limit, at the cost of efficiency that only mattered on battery. Valid
 | --- | --- |
 | ![Thermocouple calibration](docs/images/thermocouple-calibration.png) | ![Thermistor calibration](docs/images/thermistor-calibration.png) |
 
-- **Thermocouple.** Tested with the pan center up to 263 °C, against a 260 °C
-  specification. Mounted under the pan, it read about 93 °C below the pan center on
-  average, and the gap grew as the pan got hotter. The firmware smooths it with a
-  10-sample moving average.
-- **Thermistor.** Tested with ice, room-temperature and boiling-water baths, up to
-  97.2 °C, against a 93.3 °C specification. It was erratic between about 15 and 50 °C,
-  most accurate between 55 and 80 °C, and read a few degrees high above 85 °C. The
-  firmware converts readings with a fitted Steinhart–Hart curve.
-- **Design choices.**
-  - The MAX31855K amplifier was chosen for its built-in cold-junction compensation and
-    fault detection: open circuit, short to ground, short to supply.
-  - A thermistor probe was chosen over an RTD or a digital sensor for cost and food
-    safety, with an RC filter against ADC noise.
+- **Thermocouple:** verified to 263 °C (spec: 260 °C). Mounted under the pan, it read about 93 °C below the pan's center on average, so firmware uses the measured offset curve to estimate the center temperature.
+- **Thermistor:** verified to 97.2 °C (spec: 93.3 °C) with ice, room-temperature, and boiling water baths. It read high between 15 and 40 °C and was most accurate between 55 and 80 °C, so firmware applies a calibration curve from those measurements.
+- **Design choices:** SPI thermocouple amplifier for built-in cold-junction compensation; thermistor probe over an RTD or digital sensor for cost and food safety, with an RC filter against ADC noise.
 
 ## Feedback control
 
 ![Control loop block diagram](docs/images/control-loop.png)
 
-*Control loop design. The "servo + knob" block is the stepper and knob mount in the
-built system.*
-
-- **PI rather than PID**, to reduce overshoot. Searing needs a steady pan more than a fast
-  one.
-- **Conditioning.** Rate limits and a deadband on the controller output keep the motor
-  from hunting.
-- **Asymmetric response.** Heat goes up gently and comes down aggressively.
-- **Safety override.** An over-temperature or a sensor fault forces the knob to OFF,
-  whatever the controller output.
-- **Pan temperature, not food temperature, is the controlled variable.** The pan responds
-  faster and can be controlled directly. Food temperature drives the cooking steps instead.
+- **Controller:** PI rather than PID, to reduce overshoot. Searing needs a steady pan more than a fast one.
+- **Conditioning:** rate limits and a deadband on the controller output keep the motor from hunting.
+- **Asymmetric response:** heat increases gently and decreases aggressively.
+- **Safety override:** an over-temperature or sensor fault forces the knob angle to OFF, regardless of the controller output.
+- **Why control pan temperature, not food temperature:** the pan responds faster and is directly controllable. Food temperature drives the cooking state instead.
 
 Measured performance:
 
@@ -157,73 +78,89 @@ Measured performance:
 | 360° rotation | Rotates continuously in both directions |
 | Response time ≤ 0.5 s | Motor response under 3 ms, electrical signal delay under 40 µs |
 | Torque to turn a stove knob | 0.05 N·m through the 3D-printed mount |
-| Fail safe on sensor fault | Drives the knob to its lowest setting and alerts the user |
+| Fail safe on sensor fault | Drives knob to lowest setting and alerts the user |
 
-The stepper runs open loop: it moves by a commanded angle, with no encoder feedback.
-Software can turn the stove off during a fault, but if the motor itself fails, the user
-has to pull it off the knob.
+The stepper runs open loop: it moves by a commanded angle with no encoder feedback. Software can turn the stove off during a fault, but if the motor itself fails, the user has to pull it off the knob.
 
 ## Data processing and state machine
 
-The host-side pipeline turns the raw BLE stream into cooking decisions:
+The firmware turns raw temperature streams into cooking decisions:
 
-1. **Decoding.** Each 24-byte BLE packet holds a sequence number, a timestamp, pan and
-   probe temperatures, and fault flags.
-2. **Filtering.** A 3-sample median filter removes spikes, then a 10-sample moving average
-   smooths each channel.
-3. **Features.** A 50-sample moving linear regression gives the temperature slope in °C
-   per minute, and a 50-sample moving variance measures how stable the readings are.
-4. **Fault detection.** Faults only count once they persist: sensor dropouts and
-   thermocouple faults for 0.5 s, and over-temperature for 3 s. Over-temperature uses
-   separate set and clear thresholds.
-5. **State machine.** The cook moves through a fixed sequence of states, shown below.
+1. **Sampling** of pan and food temperatures, with a 5-sample history buffer
+2. **Signal processing:** range checks, clipping, and noise filtering
+3. **Feature extraction:** temperature slope, short-window variance, stability, and controller rise time and overshoot
+4. **Decision logic:** a finite state machine whose transitions are driven by those features and the session parameters from the app (food type, thickness, target doneness)
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> PREHEAT: start
-    PREHEAT --> SEAR1: preheat temperature reached
+    IDLE --> PREHEAT: session started from app
+    PREHEAT --> SEAR1: pan ready
     SEAR1 --> SEAR2: flip
-    SEAR2 --> REST: target internal temperature met
-    REST --> DONE: rest timer expired
+    SEAR2 --> REST: remove from heat
+    REST --> DONE: rest timer complete
     DONE --> [*]
-    PREHEAT --> ERROR: critical fault
-    SEAR1 --> ERROR: critical fault
-    SEAR2 --> ERROR: critical fault
-    ERROR --> IDLE: reset
 ```
 
-Any active state can also return to IDLE on cancel.
+Faults are tracked as flags alongside the state (for example `faults=OVERTEMP` in the test log below), so a warning can turn the heat down without abandoning the cook.
 
-Warnings such as over-temperature are tracked as flags alongside the state, for example
-`faults=OVERTEMP` in the test log below. That way a warning can turn the heat down without
-abandoning the cook. Critical faults, such as a disconnected sensor, move the machine to
-ERROR.
+**Two-level safety thresholds.** An over-temperature threshold raises a warning and turns the heat down. A higher unsafe maximum triggers full shutdown. This avoids nuisance shutdowns while keeping a hard limit.
 
-**Two-level safety thresholds.** An over-temperature threshold raises a warning and turns
-the heat down, and a higher unsafe maximum triggers a full shutdown. This avoids nuisance
-shutdowns while keeping a hard limit.
-
-![Activity diagram for a cook session, from the design stage](docs/images/firmware-activity-diagram.png)
-
-*Design-stage activity diagram for a cook session.*
+![Firmware activity diagram](docs/images/firmware-activity-diagram.png)
 
 ## Mobile app
 
-| Home | Choose food | Thickness | Doneness | Cooking |
-| --- | --- | --- | --- | --- |
-| ![Home screen with live probe and pan temperatures](docs/images/app-home.jpg) | ![Food selection](docs/images/app-choose-food.jpg) | ![Thickness selection](docs/images/app-thickness.jpg) | ![Doneness selection with cook time per side](docs/images/app-doneness.jpg) | ![Cooking side 1 with timer, probe chart and live temperatures](docs/images/app-cooking.jpg) |
+| Choose food | Thickness | Doneness | Live cook |
+| --- | --- | --- | --- |
+| ![Food selection](docs/images/app-choose-food.jpg) | ![Thickness selection](docs/images/app-thickness.jpg) | ![Doneness selection](docs/images/app-doneness.jpg) | ![Cooking side 1 with timer, probe chart and live temperatures](docs/images/app-cooking.jpg) |
 
-*These screenshots come from a build that displayed °F. The final app uses °C, with the
-same targets: 135 °F medium rare is 57 °C.*
+- **Guided cooking:** pick a food, its thickness, and a target doneness, then follow prompts to preheat, flip, remove, and rest
+- **Live monitoring:** pan and probe temperatures with a history chart and a time-to-flip countdown
+- **Macro tracking:** UPC barcode scan or manual search against a nutrition database, with saved recipes and daily totals
 
-- **Guided cooking.** Pick a food, its thickness and a target doneness, then follow the
-  prompts to preheat, sear, flip, sear again and rest.
-- **Live monitoring.** Pan and probe temperatures, a filtered probe-history chart, a
-  countdown for each side, and a BLE connection indicator.
-- **Macro tracking.** Daily calorie, protein, carb and fat totals against goals. Foods
-  come from a UPC barcode scan (Open Food Facts first, then USDA) or a USDA FoodData
-  Central search. Recipes can be saved with their macro totals.
+| Monitor |
+| --- |
+| ![Home screen with live probe and pan temperatures](docs/images/app-home.jpg) |
+
+**Design choices**
+
+- **BLE over Wi-Fi:** lower power and no network setup, at the cost of about 10 m of range. BLE rate was traded against current draw, keeping the minimum rate the thermal system's response time requires.
+- **Temperature-driven flips over timers or a camera:** timers ignore thickness, and a camera struggles with steam and smoke.
+
+![Software overview](docs/images/software-overview.png)
+
+## Testing
+
+**End-to-end cook cycle over BLE.** The state machine stepped through a full cook with live pan and probe data, logging each transition and active fault flag:
+
+![FSM test log](docs/images/fsm-test-log.png)
+
+**BLE throughput.** 59 packets and 1,416 bytes over 60 s (about 188 bps against a 100 bps requirement), with zero lost, duplicated, or reordered packets:
+
+![BLE throughput test](docs/images/ble-throughput-test.png)
+
+**Fault handling on the LCD.** Over-temperature warning, pan sensor disconnected, and food probe disconnected during an over-temperature:
+
+![LCD fault states](docs/images/lcd-fault-states.jpg)
+
+## Specification results
+
+| Specification | Result |
+| --- | --- |
+| Added hardware under 400 g | Met |
+| At least 60 minutes of continuous operation | Met |
+| Pan sensor functional to 260 °C | Met (263 °C) |
+| Food sensor functional to 93.3 °C | Met (97.2 °C) |
+| Microcontroller powered at 5 V or less | Met |
+| BLE throughput of at least 100 bps | Met (about 188 bps) |
+| Display readable from 2 ft | Met |
+| Motor: 360° rotation, ≤ 0.5 s response, enough torque | Met |
+| App takes food and doneness inputs, guides the cook, monitors temperatures, prompts transitions | Met |
+| Fails safe and alerts the user on sensor malfunction | Met |
+| Pan sensor 1 s response and ±5° accuracy (reach goal) | Not met (measured); placement offset compensated in software |
+| Food sensor ±2° accuracy (reach goal) | Not met (measured); low-range error compensated with a calibration curve |
+
+## App internals
 
 ### Adaptive flip timer
 
@@ -277,37 +214,9 @@ the recent average.
   every screen reads from it. It reconnects automatically after 2 seconds and shows a
   live connected or offline indicator.
 
-### Design choices
+### Testing without hardware
 
-- **BLE from the pan.** BLE uses little power and needs no Wi-Fi setup on the board, at
-  the cost of about 10 m of range. The host relays the data to the phone over the local
-  network. The BLE packet rate was traded against current draw, keeping the minimum rate
-  the thermal system's response time needs.
-- **Probe-driven flips, not fixed timers or a camera.** Fixed timers ignore thickness and
-  pan heat, and a camera struggles with steam and smoke.
-
-![Software overview](docs/images/software-overview.png)
-
-*Design-stage software overview covering the macro-tracking and cooking flows.*
-
-## Testing
-
-**End-to-end cook cycle over BLE.** The state machine stepped through a full cook with
-live pan and probe data, logging each transition and every active fault flag:
-
-![FSM test log](docs/images/fsm-test-log.png)
-
-**BLE throughput.** 59 packets and 1,416 bytes in 60 seconds, about 188 bps against a
-100 bps requirement, with no lost, duplicated or reordered packets:
-
-![BLE throughput test](docs/images/ble-throughput-test.png)
-
-**Fault handling on the LCD.** From left to right: an over-temperature warning, the pan
-sensor disconnected, and the food probe disconnected during an over-temperature.
-
-![LCD fault states](docs/images/lcd-fault-states.jpg)
-
-**Without hardware.** `host/mock_telemetry.py` serves the same JSON as the real bridge,
+`host/mock_telemetry.py` serves the same JSON as the real bridge,
 using simulated temperature curves that rise toward a target and level off. It can inject
 outlier spikes to test the chart's filter, and has settings for specific cases:
 
@@ -321,23 +230,6 @@ python host/mock_telemetry.py --pan-target 750 --pan-instant --probe-tau 25 --pr
 
 `host/ws_tail.py` prints the live stream one line per packet, for debugging from a
 terminal.
-
-## Specification results
-
-| Specification | Result |
-| --- | --- |
-| Added hardware under 400 g | Met |
-| At least 60 minutes of continuous operation | Met |
-| Pan sensor functional to 260 °C | Met: tested with the pan center at 263 °C |
-| Food sensor functional to 93.3 °C | Met: 97.2 °C |
-| Microcontroller powered at 5 V or less | Met |
-| BLE throughput of at least 100 bps | Met: about 188 bps |
-| Display readable from 2 ft | Met |
-| Motor: 360° rotation, ≤ 0.5 s response, enough torque | Met |
-| App takes food and doneness inputs, guides the cook, monitors temperatures, prompts transitions | Met |
-| Fails safe and alerts the user on sensor malfunction | Met |
-| Pan sensor 1 s response and ±5 °C accuracy (reach goal) | Not met: the under-pan mount reads well below the pan center |
-| Food sensor ±2 °C accuracy (reach goal) | Not met: erratic below 50 °C, so a fitted calibration curve is used |
 
 ## Running it
 
@@ -395,5 +287,4 @@ docs/images/                   photos, diagrams, test results and screenshots
 ## Team
 
 SmartSear was a team senior design project. We worked across the whole stack together
-rather than splitting into fixed roles. The embedded firmware and the BLE data pipeline
-are in [`sophiezhou1/ece-design`](https://github.com/sophiezhou1/ece-design).
+rather than splitting into fixed roles.
