@@ -1,5 +1,7 @@
 # Smart Sear
 
+*A team senior design project: a working prototype, not a commercial product.*
+
 Closed-loop smart cooking system built on an ESP32. A thermocouple under the pan and a probe in the meat feed a firmware state machine that drives a stepper motor on the stovetop knob, streams live data over Bluetooth Low Energy to a mobile app, and fails safe when a sensor faults or the pan overheats.
 
 ![Smart Sear system on the bench: pan, meat probe, LCD, stepper on the stove knob, and the mobile app](docs/images/system-overview.jpg)
